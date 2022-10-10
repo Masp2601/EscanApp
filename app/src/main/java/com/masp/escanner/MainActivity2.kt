@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.util.Log
+import android.view.ViewGroup
 import android.widget.Toast
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
@@ -20,6 +21,7 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import com.masp.escanner.databinding.ActivityMain2Binding
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 private const val CAMERA_PERMISSION_REQUEST_CODE = 1
@@ -27,12 +29,20 @@ private const val CAMERA_PERMISSION_REQUEST_CODE = 1
 @ExperimentalGetImage
 
 class MainActivity2 : AppCompatActivity() {
+    private lateinit var cameraExecutor: ExecutorService
+    private lateinit var barcodeBoxView: BarcodeBoxView
     private lateinit var binding: ActivityMain2Binding
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMain2Binding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        cameraExecutor = Executors.newSingleThreadExecutor()
+
+        barcodeBoxView = BarcodeBoxView(this)
+        addContentView(barcodeBoxView, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
 
         if (hasCameraPermission()) bindCameraUseCases()
         else requestPermission()
@@ -120,13 +130,31 @@ class MainActivity2 : AppCompatActivity() {
 
             // configure to use the back camera
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+            // Image analyzer
+            val imageAnalyzer = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+                .also {
+                    it.setAnalyzer(
+                        cameraExecutor,
+                        QrCodeAnalyzer(
+                            this,
+                            barcodeBoxView,
+                            binding.cameraView.width.toFloat(),
+                            binding.cameraView.height.toFloat()
+                        )
+                    )
+                }
+
 
             try {
                 cameraProvider.bindToLifecycle(
                     this,
                     cameraSelector,
+                    imageAnalyzer,
                     previewUseCase,
                     analysisUseCase)
+                // Bind use cases to camera
             } catch (illegalStateException: IllegalStateException) {
                 // If the use case has already been bound to another lifecycle or method is not called on main thread.
                 Log.e(TAG, illegalStateException.message.orEmpty())
@@ -146,7 +174,7 @@ class MainActivity2 : AppCompatActivity() {
             val inputImage =
                 InputImage.fromMediaImage(
                     image,
-                    imageProxy.imageInfo.rotationDegrees
+                    imageProxy.imageInfo.rotationDegrees,
                 )
 
             barcodeScanner.process(inputImage)
@@ -169,11 +197,56 @@ class MainActivity2 : AppCompatActivity() {
                     // call image.close() on received images when finished
                     // using them. Otherwise, new images may not be received
                     // or the camera may stall.
-
                     imageProxy.image?.close()
                     imageProxy.close()
                 }
         }
+    }
+    private fun startCamera() {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+
+        cameraProviderFuture.addListener({
+            val cameraProvider = cameraProviderFuture.get()
+
+            // Preview
+            val preview = Preview.Builder()
+                .build()
+                .also {
+                    it.setSurfaceProvider(binding.cameraView.surfaceProvider)
+                }
+
+            // Image analyzer
+            val imageAnalyzer = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+                .also {
+                    it.setAnalyzer(
+                        cameraExecutor,
+                        QrCodeAnalyzer(
+                            this,
+                            barcodeBoxView,
+                            binding.cameraView.width.toFloat(),
+                            binding.cameraView.height.toFloat()
+                        )
+                    )
+                }
+
+            // Select back camera as a default
+            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+            try {
+                // Unbind use cases before rebinding
+                cameraProvider.unbindAll()
+
+                // Bind use cases to camera
+                cameraProvider.bindToLifecycle(
+                    this, cameraSelector, preview, imageAnalyzer
+                )
+
+            } catch (exc: Exception) {
+                exc.printStackTrace()
+            }
+        }, ContextCompat.getMainExecutor(this))
     }
 
     companion object {
